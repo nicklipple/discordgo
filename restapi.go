@@ -178,13 +178,14 @@ func (s *Session) RequestWithBucketID(method, urlStr string, data interface{}, b
 		}
 	}
 
-	return s.request(method, urlStr, "application/json", body, bucketID, 0, options...)
+	return s.RequestRaw(method, urlStr, "application/json", body, bucketID, 0, options...)
 }
 
-// request makes a (GET/POST/...) Requests to Discord REST API.
+// RequestRaw makes a (GET/POST/...) Requests to Discord REST API.
+// Preferably use the other Request* methods but this lets you send JSON directly if that's what you have.
 // Sequence is the sequence number, if it fails with a 502 it will
 // retry with sequence+1 until it either succeeds or sequence >= session.MaxRestRetries
-func (s *Session) request(method, urlStr, contentType string, b []byte, bucketID string, sequence int, options ...RequestOption) (response []byte, err error) {
+func (s *Session) RequestRaw(method, urlStr, contentType string, b []byte, bucketID string, sequence int, options ...RequestOption) (response []byte, err error) {
 	if bucketID == "" {
 		bucketID = strings.SplitN(urlStr, "?", 2)[0]
 	}
@@ -266,6 +267,12 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 	case http.StatusOK:
 	case http.StatusCreated:
 	case http.StatusNoContent:
+	case http.StatusInternalServerError:
+		fallthrough
+	case http.StatusServiceUnavailable:
+		fallthrough
+	case http.StatusGatewayTimeout:
+		fallthrough
 	case http.StatusBadGateway:
 		// Retry sending request if possible
 		if sequence < cfg.MaxRestRetries {
@@ -275,7 +282,7 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 		} else {
 			err = fmt.Errorf("Exceeded Max retries HTTP %s, %s", resp.Status, response)
 		}
-	case 429: // TOO MANY REQUESTS - Rate limiting
+	case http.StatusTooManyRequests:
 		rl := TooManyRequests{}
 		err = Unmarshal(response, &rl)
 		if err != nil {
@@ -807,6 +814,10 @@ func (s *Session) GuildMembers(guildID string, after string, limit int, options 
 	}
 
 	err = unmarshal(body, &st)
+	// The returned objects don't have the GuildID attribute so we will set it here.
+	for _, member := range st {
+		member.GuildID = guildID
+	}
 	return
 }
 
@@ -1012,7 +1023,7 @@ func (s *Session) GuildMemberRoleRemove(guildID, userID, roleID string, options 
 // guildID   : The ID of a Guild.
 func (s *Session) GuildChannels(guildID string, options ...RequestOption) (st []*Channel, err error) {
 
-	body, err := s.request("GET", EndpointGuildChannels(guildID), "", nil, EndpointGuildChannels(guildID), 0, options...)
+	body, err := s.RequestRaw("GET", EndpointGuildChannels(guildID), "", nil, EndpointGuildChannels(guildID), 0, options...)
 	if err != nil {
 		return
 	}
@@ -1105,6 +1116,20 @@ func (s *Session) GuildRoles(guildID string, options ...RequestOption) (st []*Ro
 	return // TODO return pointer
 }
 
+// GuildRole returns a specific role for a given guild.
+// guildID   : The ID of a Guild.
+// roleID    : The ID of a Role.
+func (s *Session) GuildRole(guildID, roleID string, options ...RequestOption) (st *Role, err error) {
+	body, err := s.RequestWithBucketID("GET", EndpointGuildRole(guildID, roleID), nil, EndpointGuildRole(guildID, ""), options...)
+	if err != nil {
+		return
+	}
+
+	err = unmarshal(body, &st)
+
+	return
+}
+
 // GuildRoleCreate creates a new Guild Role and returns it.
 // guildID : The ID of a Guild.
 // data    : New Role parameters.
@@ -1162,6 +1187,21 @@ func (s *Session) GuildRoleDelete(guildID, roleID string, options ...RequestOpti
 
 	_, err = s.RequestWithBucketID("DELETE", EndpointGuildRole(guildID, roleID), nil, EndpointGuildRole(guildID, ""), options...)
 
+	return
+}
+
+// GuildRoleMemberCounts returns a map of role ID to the number of members that have that role.
+//
+// guildID	: The ID of a Guild.
+//
+// Does not include the @everyone role.
+func (s *Session) GuildRoleMemberCounts(guildID string, options ...RequestOption) (memberCounts map[string]uint64, err error) {
+	body, err := s.RequestWithBucketID("GET", EndpointGuildRoleMemberCounts(guildID), nil, EndpointGuildRoleMemberCounts(guildID), options...)
+	if err != nil {
+		return
+	}
+
+	err = unmarshal(body, &memberCounts)
 	return
 }
 
@@ -1783,7 +1823,7 @@ func (s *Session) ChannelMessageSendComplex(channelID string, data *MessageSend,
 		if encodeErr != nil {
 			return st, encodeErr
 		}
-		response, err = s.request("POST", endpoint, contentType, body, endpoint, 0, options...)
+		response, err = s.RequestRaw("POST", endpoint, contentType, body, endpoint, 0, options...)
 	} else {
 		response, err = s.RequestWithBucketID("POST", endpoint, data, endpoint, options...)
 	}
@@ -1895,7 +1935,7 @@ func (s *Session) ChannelMessageEditComplex(m *MessageEdit, options ...RequestOp
 		if encodeErr != nil {
 			return st, encodeErr
 		}
-		response, err = s.request("PATCH", endpoint, contentType, body, EndpointChannelMessage(m.Channel, ""), 0, options...)
+		response, err = s.RequestRaw("PATCH", endpoint, contentType, body, EndpointChannelMessage(m.Channel, ""), 0, options...)
 	} else {
 		response, err = s.RequestWithBucketID("PATCH", endpoint, m, EndpointChannelMessage(m.Channel, ""), options...)
 	}
@@ -1979,15 +2019,31 @@ func (s *Session) ChannelMessageUnpin(channelID, messageID string, options ...Re
 // ChannelMessagesPinned returns an array of Message structures for pinned messages
 // within a given channel
 // channelID : The ID of a Channel.
-func (s *Session) ChannelMessagesPinned(channelID string, options ...RequestOption) (st []*Message, err error) {
+// before : If specified returns only pinned messages before the timestamp
+// limit  : Optional maximum amount of pinned messages to return.
+func (s *Session) ChannelMessagesPinned(channelID string, before *time.Time, limit int, options ...RequestOption) (pinnedMessages *ChannelMessagePinsList, err error) {
+	uri := EndpointChannelMessagesPins(channelID)
 
-	body, err := s.RequestWithBucketID("GET", EndpointChannelMessagesPins(channelID), nil, EndpointChannelMessagesPins(channelID), options...)
+	v := url.Values{}
 
+	if before != nil {
+		v.Set("before", before.Format(time.RFC3339))
+	}
+
+	if limit > 0 {
+		v.Set("limit", strconv.Itoa(limit))
+	}
+
+	if len(v) > 0 {
+		uri += "?" + v.Encode()
+	}
+
+	body, err := s.RequestWithBucketID("GET", uri, nil, uri, options...)
 	if err != nil {
 		return
 	}
 
-	err = unmarshal(body, &st)
+	err = unmarshal(body, &pinnedMessages)
 	return
 }
 
@@ -2432,7 +2488,7 @@ func (s *Session) webhookExecute(webhookID, token string, wait bool, threadID st
 			return st, encodeErr
 		}
 
-		response, err = s.request("POST", uri, contentType, body, uri, 0, options...)
+		response, err = s.RequestRaw("POST", uri, contentType, body, uri, 0, options...)
 	} else {
 		response, err = s.RequestWithBucketID("POST", uri, data, uri, options...)
 	}
@@ -2492,7 +2548,7 @@ func (s *Session) WebhookMessageEdit(webhookID, token, messageID string, data *W
 			return nil, err
 		}
 
-		response, err = s.request("PATCH", uri, contentType, body, uri, 0, options...)
+		response, err = s.RequestRaw("PATCH", uri, contentType, body, uri, 0, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -2712,7 +2768,7 @@ func (s *Session) ForumThreadStartComplex(channelID string, threadData *ThreadSt
 			return th, encodeErr
 		}
 
-		response, err = s.request("POST", endpoint, contentType, body, endpoint, 0, options...)
+		response, err = s.RequestRaw("POST", endpoint, contentType, body, endpoint, 0, options...)
 	} else {
 		response, err = s.RequestWithBucketID("POST", endpoint, data, endpoint, options...)
 	}
@@ -3142,7 +3198,7 @@ func (s *Session) InteractionRespond(interaction *Interaction, resp *Interaction
 			return err
 		}
 
-		_, err = s.request("POST", endpoint, contentType, body, endpoint, 0, options...)
+		_, err = s.RequestRaw("POST", endpoint, contentType, body, endpoint, 0, options...)
 		return err
 	}
 
@@ -3702,5 +3758,21 @@ func (s *Session) Subscription(skuID, subscriptionID, userID string, options ...
 	}
 
 	err = unmarshal(body, &subscription)
+	return
+}
+
+// UserVoiceState returns the voice state of the current user (the bot) in a guild.
+// guildID : The ID of the guild.
+// userID  : The ID of the user.
+// Note: Using @me will return the bot's voice state for the given guild.
+func (s *Session) UserVoiceState(guildID string, userID string, options ...RequestOption) (state *VoiceState, err error) {
+	endpoint := EndpointGuildMemberVoiceState(guildID, userID)
+
+	body, err := s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	if err != nil {
+		return
+	}
+
+	err = unmarshal(body, &state)
 	return
 }

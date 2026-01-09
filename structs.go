@@ -72,7 +72,7 @@ type Session struct {
 	// Exposed but should not be modified by User.
 
 	// Whether the Data Websocket is ready
-	DataReady bool // NOTE: Maye be deprecated soon
+	DataReady bool // NOTE: Maybe deprecated soon
 
 	// Max number of REST API retries
 	MaxRestRetries int
@@ -125,6 +125,9 @@ type Session struct {
 
 	// sequence tracks the current gateway api websocket sequence number
 	sequence *int64
+
+	// stores sessions current Discord Resume Gateway
+	resumeGatewayURL string
 
 	// stores sessions current Discord Gateway
 	gateway string
@@ -612,7 +615,7 @@ type Emoji struct {
 
 // EmojiRegex is the regex used to find and identify emojis in messages
 var (
-	EmojiRegex = regexp.MustCompile(`<(a|):[A-z0-9_~]+:[0-9]{18,20}>`)
+	EmojiRegex = regexp.MustCompile(`<(a|):[A-Za-z0-9_~]+:[0-9]{18,20}>`)
 )
 
 // MessageFormat returns a correctly formatted Emoji for use in Message content and embeds
@@ -1319,27 +1322,35 @@ type GuildFeature string
 
 // Constants for GuildFeature
 const (
-	GuildFeatureAnimatedBanner                GuildFeature = "ANIMATED_BANNER"
-	GuildFeatureAnimatedIcon                  GuildFeature = "ANIMATED_ICON"
-	GuildFeatureAutoModeration                GuildFeature = "AUTO_MODERATION"
-	GuildFeatureBanner                        GuildFeature = "BANNER"
-	GuildFeatureCommunity                     GuildFeature = "COMMUNITY"
-	GuildFeatureDiscoverable                  GuildFeature = "DISCOVERABLE"
-	GuildFeatureFeaturable                    GuildFeature = "FEATURABLE"
-	GuildFeatureInviteSplash                  GuildFeature = "INVITE_SPLASH"
-	GuildFeatureMemberVerificationGateEnabled GuildFeature = "MEMBER_VERIFICATION_GATE_ENABLED"
-	GuildFeatureMonetizationEnabled           GuildFeature = "MONETIZATION_ENABLED"
-	GuildFeatureMoreStickers                  GuildFeature = "MORE_STICKERS"
-	GuildFeatureNews                          GuildFeature = "NEWS"
-	GuildFeaturePartnered                     GuildFeature = "PARTNERED"
-	GuildFeaturePreviewEnabled                GuildFeature = "PREVIEW_ENABLED"
-	GuildFeaturePrivateThreads                GuildFeature = "PRIVATE_THREADS"
-	GuildFeatureRoleIcons                     GuildFeature = "ROLE_ICONS"
-	GuildFeatureTicketedEventsEnabled         GuildFeature = "TICKETED_EVENTS_ENABLED"
-	GuildFeatureVanityURL                     GuildFeature = "VANITY_URL"
-	GuildFeatureVerified                      GuildFeature = "VERIFIED"
-	GuildFeatureVipRegions                    GuildFeature = "VIP_REGIONS"
-	GuildFeatureWelcomeScreenEnabled          GuildFeature = "WELCOME_SCREEN_ENABLED"
+	GuildFeatureAnimatedBanner                        GuildFeature = "ANIMATED_BANNER"
+	GuildFeatureAnimatedIcon                          GuildFeature = "ANIMATED_ICON"
+	GuildFeatureApplicationCommandPermissionV2        GuildFeature = "APPLICATION_COMMAND_PERMISSIONS_V2"
+	GuildFeatureAutoModeration                        GuildFeature = "AUTO_MODERATION"
+	GuildFeatureBanner                                GuildFeature = "BANNER"
+	GuildFeatureCommunity                             GuildFeature = "COMMUNITY"
+	GuildFeatureCreatorMonetizableProvisional         GuildFeature = "CREATOR_MONETIZABLE_PROVISIONAL"
+	GuildFeatureCreatorStorePage                      GuildFeature = "CREATOR_STORE_PAGE"
+	GuildFeatureDeveloperSupportServer                GuildFeature = "DEVELOPER_SUPPORT_SERVER"
+	GuildFeatureDiscoverable                          GuildFeature = "DISCOVERABLE"
+	GuildFeatureFeaturable                            GuildFeature = "FEATURABLE"
+	GuildFeatureInvitesDisabled                       GuildFeature = "INVITES_DISABLED"
+	GuildFeatureInviteSplash                          GuildFeature = "INVITE_SPLASH"
+	GuildFeatureMemberVerificationGateEnabled         GuildFeature = "MEMBER_VERIFICATION_GATE_ENABLED"
+	GuildFeatureMoreSoundboard                        GuildFeature = "MORE_SOUNDBOARD"
+	GuildFeatureMoreStickers                          GuildFeature = "MORE_STICKERS"
+	GuildFeatureNews                                  GuildFeature = "NEWS"
+	GuildFeaturePartnered                             GuildFeature = "PARTNERED"
+	GuildFeaturePreviewEnabled                        GuildFeature = "PREVIEW_ENABLED"
+	GuildFeatureRaidAlertsDisabled                    GuildFeature = "RAID_ALERTS_DISABLED"
+	GuildFeatureRoleIcons                             GuildFeature = "ROLE_ICONS"
+	GuildFeatureRoleSubscriptionsAvailableForPurchase GuildFeature = "ROLE_SUBSCRIPTIONS_AVAILABLE_FOR_PURCHASE"
+	GuildFeatureRoleSubscriptionsEnabled              GuildFeature = "ROLE_SUBSCRIPTIONS_ENABLED"
+	GuildFeatureSoundboard                            GuildFeature = "SOUNDBOARD"
+	GuildFeatureTicketedEventsEnabled                 GuildFeature = "TICKETED_EVENTS_ENABLED"
+	GuildFeatureVanityURL                             GuildFeature = "VANITY_URL"
+	GuildFeatureVerified                              GuildFeature = "VERIFIED"
+	GuildFeatureVipRegions                            GuildFeature = "VIP_REGIONS"
+	GuildFeatureWelcomeScreenEnabled                  GuildFeature = "WELCOME_SCREEN_ENABLED"
 )
 
 // A GuildParams stores all the data needed to update discord guild settings
@@ -1566,6 +1577,9 @@ type Member struct {
 	// The hash of the avatar for the guild member, if any.
 	Avatar string `json:"avatar"`
 
+	// The hash of the banner for the guild member, if any.
+	Banner string `json:"banner"`
+
 	// The underlying user on which the member is based.
 	User *User `json:"user"`
 
@@ -1610,13 +1624,29 @@ func (m *Member) AvatarURL(size string) string {
 
 }
 
+// BannerURL returns the URL of the member's banner image.
+//
+//	size:    The size of the desired banner image as a power of two
+//	         Image size can be any power of two between 16 and 4096.
+func (m *Member) BannerURL(size string) string {
+	if m.Banner == "" {
+		return m.User.BannerURL(size)
+	}
+	return bannerURL(
+		m.Banner,
+		EndpointGuildMemberBanner(m.GuildID, m.User.ID, m.Banner),
+		EndpointGuildMemberBannerAnimated(m.GuildID, m.User.ID, m.Banner),
+		size,
+	)
+}
+
 // DisplayName returns the member's guild nickname if they have one,
 // otherwise it returns their discord display name.
 func (m *Member) DisplayName() string {
 	if m.Nick != "" {
 		return m.Nick
 	}
-	return m.User.GlobalName
+	return m.User.DisplayName()
 }
 
 // ClientStatus stores the online, offline, idle, or dnd status of each device of a Guild member.
@@ -2457,6 +2487,9 @@ type Subscription struct {
 	// List of entitlements granted for this subscription
 	EntitlementIDs []string `json:"entitlement_ids"`
 
+	// List of SKUs that this user will be subscribed to at renewal
+	RenewalSKUIDs []string `json:"renewal_sku_ids,omitempty"`
+
 	// Start of the current subscription period
 	CurrentPeriodStart time.Time `json:"current_period_start"`
 
@@ -2586,6 +2619,24 @@ type EntitlementFilterOptions struct {
 
 	// Optional whether or not ended entitlements should be omitted.
 	ExcludeEnded bool
+}
+
+// MessagePin contains information about a pinned message, and the message itself
+type MessagePin struct {
+	// The time the message was pinned
+	PinnedAt time.Time `json:"pinned_at"`
+
+	// The message object which was pinned
+	Message *Message `json:"message"`
+}
+
+// ChannelMessagePinsList contains a list of pinned messages in a channel
+type ChannelMessagePinsList struct {
+	// The list of pinned messages
+	Items []*MessagePin `json:"items"`
+
+	// Whether there are more items available to fetch
+	HasMore bool `json:"has_more"`
 }
 
 // Constants for the different bit offsets of text channel permissions
@@ -2831,6 +2882,7 @@ const (
 	ErrCodeUnknownSticker                        = 10060
 	ErrCodeUnknownInteraction                    = 10062
 	ErrCodeUnknownApplicationCommand             = 10063
+	ErrCodeUnknownVoiceState                     = 10065
 	ErrCodeUnknownApplicationCommandPermissions  = 10066
 	ErrCodeUnknownStageInstance                  = 10067
 	ErrCodeUnknownGuildMemberVerificationForm    = 10068
@@ -2986,6 +3038,8 @@ const (
 	IntentGuildScheduledEvents        Intent = 1 << 16
 	IntentAutoModerationConfiguration Intent = 1 << 20
 	IntentAutoModerationExecution     Intent = 1 << 21
+	IntentGuildMessagePolls           Intent = 1 << 24
+	IntentDirectMessagePolls          Intent = 1 << 25
 
 	// TODO: remove when compatibility is not needed
 
